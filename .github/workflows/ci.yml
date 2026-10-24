@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  calidad:
+    name: Calidad (${{ matrix.servicio }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        servicio: [usuarios, productos, pedidos]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-dev.txt
+      - name: Ruff (mantenibilidad)
+        run: ruff check ${{ matrix.servicio }} && ruff format --check ${{ matrix.servicio }}
+      - name: pytest (fiabilidad, cobertura >= 80 %)
+        working-directory: ${{ matrix.servicio }}
+        run: pytest
+      - name: Bandit (seguridad)
+        run: bandit -r ${{ matrix.servicio }}/app
+
+  integracion:
+    name: Integración y carga
+    needs: calidad
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install locust==2.37.0
+      - name: Levantar la arquitectura (un solo comando)
+        run: docker compose up --build -d --wait --wait-timeout 300
+      - name: Verificación funcional y de red
+        run: bash scripts/verificar.sh
+      - name: Prueba de carga (100 usuarios, 30 s, p95 <= 2 s)
+        run: |
+          mkdir -p evidencias
+          locust -f locust/locustfile.py --headless -u 100 -r 10 -t 30s \
+            -H http://localhost --only-summary --csv evidencias/locust --html evidencias/locust.html
+      - name: Registros de los contenedores
+        if: failure()
+        run: docker compose logs --no-color
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: evidencias-carga
+          path: evidencias/
+      - if: always()
+        run: docker compose down -v

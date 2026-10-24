@@ -1,0 +1,171 @@
+# =============================================================================
+# Laboratorio · Arquitectura de microservicios con Python y FastAPI
+# Un solo comando:  docker compose up --build -d
+#
+# Topología de redes (todas "internal" salvo la pública):
+#   publica          -> solo Nginx (único puerto publicado en el anfitrión)
+#   privada          -> Nginx <-> Kong <-> servicios (tráfico norte-sur y este-oeste)
+#   datos-usuarios   -> usuarios  <-> db-usuarios   (aislamiento por servicio)
+#   datos-productos  -> productos <-> db-productos
+#   datos-pedidos    -> pedidos   <-> db-pedidos
+# Ningún servicio puede alcanzar la base de datos de otro: ni siquiera resuelve su nombre.
+# =============================================================================
+name: lab-microservicios
+
+x-servicio-python: &servicio-python
+  restart: unless-stopped
+  read_only: true
+  tmpfs: [/tmp]
+  security_opt: ["no-new-privileges:true"]
+
+x-postgres: &postgres
+  image: postgres:16-alpine
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+
+x-kong: &kong
+  image: kong:3.9
+  restart: unless-stopped
+  environment:
+    KONG_DATABASE: "off"                                  # modo DB-less (declarativo)
+    KONG_DECLARATIVE_CONFIG: /kong/declarative/kong.yml
+    KONG_PROXY_LISTEN: 0.0.0.0:8000
+    KONG_ADMIN_LISTEN: "off"                              # sin Admin API: superficie mínima
+    KONG_STATUS_LISTEN: 0.0.0.0:8100
+    KONG_NGINX_WORKER_PROCESSES: "2"
+    KONG_TRUSTED_IPS: 0.0.0.0/0,::/0                      # confía en X-Forwarded-For de Nginx
+    KONG_REAL_IP_HEADER: X-Forwarded-For
+    KONG_PROXY_ACCESS_LOG: /dev/stdout
+    KONG_PROXY_ERROR_LOG: /dev/stderr
+  volumes:
+    - ./kong/kong.yml:/kong/declarative/kong.yml:ro
+  healthcheck:
+    test: ["CMD", "kong", "health"]
+    interval: 10s
+    timeout: 5s
+    retries: 10
+    start_period: 15s
+  depends_on:
+    usuarios: {condition: service_healthy}
+    productos: {condition: service_healthy}
+    pedidos: {condition: service_healthy}
+  networks: [privada]
+
+services:
+  # ---------------------------------------------------------------- Entrada
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"                             # ÚNICO puerto publicado
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/nginx-health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    depends_on:
+      kong-1: {condition: service_healthy}
+      kong-2: {condition: service_healthy}
+    networks: [publica, privada]
+
+  # Dos nodos de gateway para que el balanceador tenga a quién repartir.
+  kong-1: *kong
+  kong-2: *kong
+
+  # ---------------------------------------------------------------- Servicio 1
+  usuarios:
+    <<: *servicio-python
+    build: ./usuarios
+    environment:
+      DATABASE_URL: postgresql+psycopg2://usuarios_app:${USUARIOS_DB_PASSWORD:-usuarios_dev_pwd}@db-usuarios:5432/usuarios
+    depends_on:
+      db-usuarios: {condition: service_healthy}
+    networks: [privada, datos-usuarios]
+
+  db-usuarios:
+    <<: *postgres
+    environment:
+      POSTGRES_USER: usuarios_app
+      POSTGRES_PASSWORD: ${USUARIOS_DB_PASSWORD:-usuarios_dev_pwd}
+      POSTGRES_DB: usuarios
+    volumes:
+      - pg-usuarios:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U usuarios_app -d usuarios"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [datos-usuarios]
+
+  # ---------------------------------------------------------------- Servicio 2
+  productos:
+    <<: *servicio-python
+    build: ./productos
+    environment:
+      DATABASE_URL: postgresql+psycopg2://productos_app:${PRODUCTOS_DB_PASSWORD:-productos_dev_pwd}@db-productos:5432/productos
+    depends_on:
+      db-productos: {condition: service_healthy}
+    networks: [privada, datos-productos]
+
+  db-productos:
+    <<: *postgres
+    environment:
+      POSTGRES_USER: productos_app
+      POSTGRES_PASSWORD: ${PRODUCTOS_DB_PASSWORD:-productos_dev_pwd}
+      POSTGRES_DB: productos
+    volumes:
+      - pg-productos:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U productos_app -d productos"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [datos-productos]
+
+  # ---------------------------------------------------------------- Servicio 3
+  pedidos:
+    <<: *servicio-python
+    build: ./pedidos
+    environment:
+      DATABASE_URL: postgresql+psycopg2://pedidos_app:${PEDIDOS_DB_PASSWORD:-pedidos_dev_pwd}@db-pedidos:5432/pedidos
+      # Comunicación este-oeste: pedidos consulta las APIs (no las BD) de los otros servicios
+      USUARIOS_URL: http://usuarios:8000
+      PRODUCTOS_URL: http://productos:8000
+    depends_on:
+      db-pedidos: {condition: service_healthy}
+      usuarios: {condition: service_healthy}
+      productos: {condition: service_healthy}
+    networks: [privada, datos-pedidos]
+
+  db-pedidos:
+    <<: *postgres
+    environment:
+      POSTGRES_USER: pedidos_app
+      POSTGRES_PASSWORD: ${PEDIDOS_DB_PASSWORD:-pedidos_dev_pwd}
+      POSTGRES_DB: pedidos
+    volumes:
+      - pg-pedidos:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pedidos_app -d pedidos"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [datos-pedidos]
+
+networks:
+  publica: {}
+  privada:
+    internal: true
+  datos-usuarios:
+    internal: true
+  datos-productos:
+    internal: true
+  datos-pedidos:
+    internal: true
+
+volumes:
+  pg-usuarios:
+  pg-productos:
+  pg-pedidos:

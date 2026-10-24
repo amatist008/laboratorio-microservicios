@@ -1,0 +1,59 @@
+# Kong Gateway OSS · configuración declarativa (modo DB-less)
+_format_version: "3.0"
+_transform: true
+
+services:
+  - name: usuarios
+    url: http://usuarios:8000
+    connect_timeout: 5000
+    read_timeout: 30000
+    retries: 2
+    routes:
+      - name: ruta-usuarios
+        paths: [/usuarios]
+        strip_path: false
+        preserve_host: true
+
+  - name: productos
+    url: http://productos:8000
+    connect_timeout: 5000
+    read_timeout: 30000
+    retries: 2
+    routes:
+      - name: ruta-productos
+        paths: [/productos]
+        strip_path: false
+        preserve_host: true
+
+  - name: pedidos
+    url: http://pedidos:8000
+    connect_timeout: 5000
+    read_timeout: 30000
+    retries: 2
+    routes:
+      - name: ruta-pedidos
+        paths: [/pedidos]
+        strip_path: false
+        preserve_host: true
+
+# Plugins globales (aplican a todas las rutas)
+plugins:
+  # Trazabilidad: cada petición lleva un X-Request-ID de punta a punta
+  - name: correlation-id
+    config:
+      header_name: X-Request-ID
+      generator: uuid
+      echo_downstream: true
+
+  # Limitación de tasa por IP de origen (holgada para no sesgar la prueba de carga)
+  - name: rate-limiting
+    config:
+      second: 300
+      policy: local
+      limit_by: ip
+
+  # Rechaza cuerpos mayores a 1 MB antes de que lleguen a los servicios
+  - name: request-size-limiting
+    config:
+      allowed_payload_size: 1
+      size_unit: megabytes

@@ -1,0 +1,8 @@
+# Herramientas de calidad (se instalan en el equipo del desarrollador / CI, NO en las imágenes)
+-r usuarios/requirements.txt
+httpx==0.28.1
+ruff==0.11.8
+pytest==8.3.5
+pytest-cov==6.1.1
+bandit==1.8.3
+locust==2.37.0
